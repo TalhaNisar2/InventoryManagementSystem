@@ -108,6 +108,7 @@ export default function ProductForm({
     ev.preventDefault();
     if (!validate()) return;
 
+    const qty = Math.round(Number(values.quantity));
     const payload = {
       name: values.name.trim(),
       sku: values.sku.trim().toUpperCase(),
@@ -116,7 +117,12 @@ export default function ProductForm({
       unit: values.unit.trim() || "pcs",
       costPrice: Number(values.costPrice),
       sellPrice: Number(values.sellPrice),
-      quantity: Math.round(Number(values.quantity)),
+      quantity: qty,
+      // New product: total added starts equal to opening stock.
+      // On edit, store bumps totalReceived when quantity increases.
+      totalReceived: product
+        ? Math.max(product.totalReceived ?? product.quantity, qty)
+        : qty,
       reorderLevel: Math.round(Number(values.reorderLevel)),
       location: values.location.trim() || "—",
     };
