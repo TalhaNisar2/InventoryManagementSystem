@@ -9,6 +9,22 @@ function getCurrency() {
   return useStore.getState().currency;
 }
 
+/** PDF-safe money string — standard Helvetica lacks €/£ glyphs, so we use ASCII codes. */
+function pdfMoney(value: number, currency: string) {
+  const code = currency || "PKR";
+  const formatted = new Intl.NumberFormat("en-US", {
+    maximumFractionDigits: value % 1 === 0 ? 0 : 2,
+    minimumFractionDigits: 0,
+  }).format(value);
+  const prefix: Record<string, string> = {
+    PKR: "Rs ",
+    USD: "USD ",
+    EUR: "EUR ",
+    GBP: "GBP ",
+  };
+  return `${prefix[code] ?? code + " "}${formatted}`;
+}
+
 function heading(r: Receipt) {
   return r.type === "sale" ? "SALES RECEIPT" : "PURCHASE RECEIPT";
 }
@@ -24,6 +40,9 @@ const LINE: [number, number, number] = [225, 227, 232];
 const SUCCESS: [number, number, number] = [22, 163, 74];
 
 export function receiptToPdf(r: Receipt) {
+  if (!r) {
+    throw new Error("No receipt to export");
+  }
   const currency = getCurrency();
   const doc = new jsPDF({ unit: "pt", format: "a4" });
   const pageWidth = doc.internal.pageSize.getWidth();
@@ -133,7 +152,7 @@ export function receiptToPdf(r: Receipt) {
   doc.setFont("helvetica", "bold");
   doc.setFontSize(16);
   doc.setTextColor(255, 255, 255);
-  doc.text(formatCurrency(r.total, currency), chipX + 14, boxTop + 42);
+  doc.text(pdfMoney(r.total, currency), chipX + 14, boxTop + 42);
 
   const tableStartY = boxTop + boxH + 24;
 
@@ -144,8 +163,8 @@ export function receiptToPdf(r: Receipt) {
       i.name,
       i.sku,
       `${i.quantity} ${i.unit}`,
-      formatCurrency(i.unitPrice, currency),
-      formatCurrency(i.quantity * i.unitPrice, currency),
+      pdfMoney(i.unitPrice, currency),
+      pdfMoney(i.quantity * i.unitPrice, currency),
     ]),
     styles: { fontSize: 9, cellPadding: 8, textColor: [40, 42, 54], lineColor: LINE, lineWidth: 0.5 },
     headStyles: { fillColor: INK, textColor: 255, fontStyle: "bold", fontSize: 9 },
@@ -197,21 +216,21 @@ export function receiptToPdf(r: Receipt) {
   doc.setTextColor(...MUTED);
   doc.text("Subtotal", totalsLabelX, ty);
   doc.setTextColor(...INK);
-  doc.text(formatCurrency(r.subtotal, currency), totalsX, ty, { align: "right" });
+  doc.text(pdfMoney(r.subtotal, currency), totalsX, ty, { align: "right" });
   ty += 16;
 
   if (r.discountAmount > 0) {
     doc.setTextColor(...MUTED);
     doc.text(`Discount (${r.discountPercent}%)`, totalsLabelX, ty);
     doc.setTextColor(...INK);
-    doc.text(`-${formatCurrency(r.discountAmount, currency)}`, totalsX, ty, { align: "right" });
+    doc.text(`-${pdfMoney(r.discountAmount, currency)}`, totalsX, ty, { align: "right" });
     ty += 16;
   }
   if (r.taxAmount > 0) {
     doc.setTextColor(...MUTED);
     doc.text(`Tax (${r.taxPercent}%)`, totalsLabelX, ty);
     doc.setTextColor(...INK);
-    doc.text(formatCurrency(r.taxAmount, currency), totalsX, ty, { align: "right" });
+    doc.text(pdfMoney(r.taxAmount, currency), totalsX, ty, { align: "right" });
     ty += 16;
   }
 
@@ -223,7 +242,7 @@ export function receiptToPdf(r: Receipt) {
   doc.setTextColor(...INK);
   doc.text("Total", totalsLabelX, ty);
   doc.setTextColor(...SUCCESS);
-  doc.text(formatCurrency(r.total, currency), totalsX, ty, { align: "right" });
+  doc.text(pdfMoney(r.total, currency), totalsX, ty, { align: "right" });
 
   if (r.note) {
     ty += 30;
@@ -247,7 +266,12 @@ export function receiptToPdf(r: Receipt) {
     drawFooterOnCurrentPage(i, pageCount);
   }
 
-  doc.save(`${r.receiptNumber}.pdf`);
+  try {
+    doc.save(`${r.receiptNumber || "receipt"}.pdf`);
+  } catch (err) {
+    console.error("PDF export failed", err);
+    throw err;
+  }
 }
 
 export function receiptToExcel(r: Receipt) {

@@ -84,13 +84,17 @@ export default function ReceiptsPage() {
 
 function ReceiptBuilder({ onSaved }: { onSaved: () => void }) {
   const products = useStore((s) => s.products);
+  const customers = useStore((s) => s.customers);
+  const suppliers = useStore((s) => s.suppliers);
   const currency = useStore((s) => s.currency);
   const addReceipt = useStore((s) => s.addReceipt);
+  const upsertCustomerByName = useStore((s) => s.upsertCustomerByName);
 
   const [type, setType] = useState<ReceiptType>("sale");
   const [partyName, setPartyName] = useState("");
   const [partyContact, setPartyContact] = useState("");
   const [partyAddress, setPartyAddress] = useState("");
+  const [selectedPartyId, setSelectedPartyId] = useState("");
   const [note, setNote] = useState("");
   const [discountPercent, setDiscountPercent] = useState("0");
   const [taxPercent, setTaxPercent] = useState("0");
@@ -98,15 +102,41 @@ function ReceiptBuilder({ onSaved }: { onSaved: () => void }) {
   const [search, setSearch] = useState("");
   const [saving, setSaving] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
+  const [saveCustomer, setSaveCustomer] = useState(true);
 
-  const matches = useMemo(() => {
-    if (!search.trim()) return [];
-    const q = search.toLowerCase();
+  // Browse + search: show all matching products (not only when typing)
+  const productChoices = useMemo(() => {
+    const q = search.trim().toLowerCase();
     return products
-      .filter((p) => p.name.toLowerCase().includes(q) || p.sku.toLowerCase().includes(q))
       .filter((p) => !items.some((i) => i.productId === p.id))
-      .slice(0, 6);
+      .filter(
+        (p) =>
+          !q ||
+          p.name.toLowerCase().includes(q) ||
+          p.sku.toLowerCase().includes(q)
+      )
+      .slice(0, q ? 20 : 12);
   }, [search, products, items]);
+
+  function applyCustomer(id: string) {
+    setSelectedPartyId(id);
+    if (!id) return;
+    const c = customers.find((x) => x.id === id);
+    if (!c) return;
+    setPartyName(c.name);
+    setPartyContact(c.contact);
+    setPartyAddress(c.address);
+  }
+
+  function applySupplier(id: string) {
+    setSelectedPartyId(id);
+    if (!id) return;
+    const s = suppliers.find((x) => x.id === id);
+    if (!s) return;
+    setPartyName(s.name);
+    setPartyContact(s.phone || s.email || "");
+    setPartyAddress(s.address);
+  }
 
   const subtotal = items.reduce((sum, i) => sum + i.quantity * i.unitPrice, 0);
   const discountAmount = subtotal * (Number(discountPercent) / 100 || 0);
@@ -160,10 +190,12 @@ function ReceiptBuilder({ onSaved }: { onSaved: () => void }) {
     setPartyName("");
     setPartyContact("");
     setPartyAddress("");
+    setSelectedPartyId("");
     setNote("");
     setDiscountPercent("0");
     setTaxPercent("0");
     setItems([]);
+    setSearch("");
   }
 
   function validate(): string | null {
@@ -191,9 +223,17 @@ function ReceiptBuilder({ onSaved }: { onSaved: () => void }) {
 
   function handleConfirmSave() {
     setSaving(true);
+    const name = partyName.trim();
+    if (type === "sale" && name && saveCustomer) {
+      upsertCustomerByName({
+        name,
+        contact: partyContact.trim(),
+        address: partyAddress.trim(),
+      });
+    }
     const receipt = addReceipt({
       type,
-      partyName: partyName.trim(),
+      partyName: name,
       partyContact: partyContact.trim(),
       partyAddress: partyAddress.trim(),
       items,
@@ -221,8 +261,13 @@ function ReceiptBuilder({ onSaved }: { onSaved: () => void }) {
       toast.error("Add items before exporting.");
       return;
     }
-    receiptToPdf(draftReceipt);
-    toast.success("PDF downloaded");
+    try {
+      receiptToPdf(draftReceipt);
+      toast.success("PDF downloaded");
+    } catch (err) {
+      console.error(err);
+      toast.error("Could not generate PDF. Try again or use Print.");
+    }
   }
 
   function handleExcel() {
@@ -242,7 +287,10 @@ function ReceiptBuilder({ onSaved }: { onSaved: () => void }) {
             {(["sale", "purchase"] as ReceiptType[]).map((t) => (
               <button
                 key={t}
-                onClick={() => setType(t)}
+                onClick={() => {
+                  setType(t);
+                  setSelectedPartyId("");
+                }}
                 className={cn(
                   "flex-1 rounded-md border px-3 py-2 text-sm font-medium transition-colors",
                   type === t ? "border-ink bg-ink text-white" : "border-line bg-paper text-ink/70 hover:bg-paper/70"
@@ -253,12 +301,73 @@ function ReceiptBuilder({ onSaved }: { onSaved: () => void }) {
             ))}
           </div>
 
-          <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2">
+          {type === "sale" ? (
+            <div className="mt-4">
+              <Field label="Saved customer" hint="Select an existing contact or leave blank to type a new one">
+                <Select
+                  value={selectedPartyId}
+                  onChange={(e) => {
+                    const id = e.target.value;
+                    if (!id) {
+                      setSelectedPartyId("");
+                      return;
+                    }
+                    applyCustomer(id);
+                  }}
+                  className="bg-paper"
+                >
+                  <option value="">— New / type below —</option>
+                  {customers.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.name}{c.contact ? ` · ${c.contact}` : ""}
+                    </option>
+                  ))}
+                </Select>
+              </Field>
+            </div>
+          ) : (
+            <div className="mt-4">
+              <Field label="Saved supplier" hint="Pick from Suppliers or type below">
+                <Select
+                  value={selectedPartyId}
+                  onChange={(e) => {
+                    const id = e.target.value;
+                    if (!id) {
+                      setSelectedPartyId("");
+                      return;
+                    }
+                    applySupplier(id);
+                  }}
+                  className="bg-paper"
+                >
+                  <option value="">— New / type below —</option>
+                  {suppliers.map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {s.name}
+                    </option>
+                  ))}
+                </Select>
+              </Field>
+            </div>
+          )}
+
+          <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
             <Field label={type === "sale" ? "Customer name" : "Supplier name"}>
-              <Input value={partyName} onChange={(e) => setPartyName(e.target.value)} placeholder="Acme Co." />
+              <Input
+                value={partyName}
+                onChange={(e) => {
+                  setPartyName(e.target.value);
+                  setSelectedPartyId("");
+                }}
+                placeholder="Acme Co."
+              />
             </Field>
             <Field label="Contact (phone or email)">
-              <Input value={partyContact} onChange={(e) => setPartyContact(e.target.value)} placeholder="Optional" />
+              <Input
+                value={partyContact}
+                onChange={(e) => setPartyContact(e.target.value)}
+                placeholder="Optional"
+              />
             </Field>
           </div>
           <div className="mt-3">
@@ -266,38 +375,61 @@ function ReceiptBuilder({ onSaved }: { onSaved: () => void }) {
               <Textarea rows={2} value={partyAddress} onChange={(e) => setPartyAddress(e.target.value)} />
             </Field>
           </div>
+          {type === "sale" && partyName.trim() && (
+            <label className="mt-3 flex items-center gap-2 text-xs text-ink/80">
+              <input
+                type="checkbox"
+                checked={saveCustomer}
+                onChange={(e) => setSaveCustomer(e.target.checked)}
+                className="rounded border-line"
+              />
+              Save this customer for next time
+            </label>
+          )}
         </div>
 
         <div className="rounded-xl border border-line bg-surface p-5 shadow-card">
           <h2 className="font-display text-base font-semibold text-ink">Items</h2>
+          <p className="mt-1 text-xs text-muted">Search or browse products below, then click to add.</p>
           <div className="relative mt-3">
             <Search size={15} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted" />
             <input
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search products by name or SKU to add…"
+              placeholder="Search products by name or SKU…"
               className="w-full rounded-md border border-line bg-paper py-2 pl-9 pr-3 text-sm text-ink placeholder:text-muted focus:border-accent/50 focus:bg-surface focus:outline-none"
             />
-            {matches.length > 0 && (
-              <div className="absolute z-10 mt-1 w-full overflow-hidden rounded-md border border-line bg-surface shadow-pop">
-                {matches.map((p) => (
-                  <button
-                    key={p.id}
-                    onClick={() => addItem(p.id)}
-                    className="flex w-full items-center justify-between gap-3 px-3 py-2.5 text-left text-sm hover:bg-paper"
-                  >
-                    <span className="min-w-0">
-                      <span className="block truncate font-medium text-ink">{p.name}</span>
-                      <span className="text-xs text-muted">
-                        {p.sku} · {p.quantity} {p.unit} in stock
-                      </span>
-                    </span>
-                    <Plus size={15} className="shrink-0 text-muted" />
-                  </button>
-                ))}
-              </div>
-            )}
           </div>
+          {products.length === 0 ? (
+            <p className="mt-3 rounded-md border border-dashed border-line py-4 text-center text-sm text-muted">
+              No products yet. Add products first, then come back here.
+            </p>
+          ) : productChoices.length === 0 ? (
+            <p className="mt-3 rounded-md border border-dashed border-line py-4 text-center text-sm text-muted">
+              {search.trim() ? "No products match your search." : "All products are already on this receipt."}
+            </p>
+          ) : (
+            <div className="mt-3 max-h-52 overflow-y-auto rounded-md border border-line divide-y divide-line">
+              {productChoices.map((p) => (
+                <button
+                  key={p.id}
+                  type="button"
+                  onClick={() => addItem(p.id)}
+                  className="flex w-full items-center justify-between gap-3 px-3 py-2.5 text-left text-sm hover:bg-paper"
+                >
+                  <span className="min-w-0">
+                    <span className="block truncate font-medium text-ink">{p.name}</span>
+                    <span className="text-xs text-muted">
+                      {p.sku} · available {p.quantity}/{p.totalReceived ?? p.quantity} {p.unit}
+                    </span>
+                  </span>
+                  <span className="flex shrink-0 items-center gap-1 text-xs font-medium text-accent-dim">
+                    <Plus size={14} /> Add
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
 
           <div className="mt-4 space-y-3">
             {items.length === 0 && (
@@ -496,21 +628,38 @@ function ReceiptBuilder({ onSaved }: { onSaved: () => void }) {
 
 function ReceiptHistory() {
   const receipts = useStore((s) => s.receipts);
+  const customers = useStore((s) => s.customers);
   const currency = useStore((s) => s.currency);
   const [query, setQuery] = useState("");
   const [typeFilter, setTypeFilter] = useState<"all" | ReceiptType>("all");
+  const [contactFilter, setContactFilter] = useState("all");
   const [viewing, setViewing] = useState<Receipt | undefined>(undefined);
+
+  const partyNames = useMemo(() => {
+    const set = new Set<string>();
+    receipts.forEach((r) => {
+      if (r.partyName.trim()) set.add(r.partyName.trim());
+    });
+    customers.forEach((c) => {
+      if (c.name.trim()) set.add(c.name.trim());
+    });
+    return Array.from(set).sort((a, b) => a.localeCompare(b));
+  }, [receipts, customers]);
 
   const filtered = useMemo(() => {
     return receipts.filter((r) => {
       const matchesQuery =
         !query.trim() ||
         r.receiptNumber.toLowerCase().includes(query.toLowerCase()) ||
-        r.partyName.toLowerCase().includes(query.toLowerCase());
+        r.partyName.toLowerCase().includes(query.toLowerCase()) ||
+        r.partyContact.toLowerCase().includes(query.toLowerCase());
       const matchesType = typeFilter === "all" || r.type === typeFilter;
-      return matchesQuery && matchesType;
+      const matchesContact =
+        contactFilter === "all" ||
+        r.partyName.trim().toLowerCase() === contactFilter.toLowerCase();
+      return matchesQuery && matchesType && matchesContact;
     });
-  }, [receipts, query, typeFilter]);
+  }, [receipts, query, typeFilter, contactFilter]);
 
   if (receipts.length === 0) {
     return (
@@ -544,6 +693,19 @@ function ReceiptHistory() {
             <option value="all">All types</option>
             <option value="sale">Sales</option>
             <option value="purchase">Purchases</option>
+          </Select>
+          <Select
+            value={contactFilter}
+            onChange={(e) => setContactFilter(e.target.value)}
+            wrapperClassName="sm:w-48"
+            className="bg-surface"
+          >
+            <option value="all">All contacts</option>
+            {partyNames.map((name) => (
+              <option key={name} value={name}>
+                {name}
+              </option>
+            ))}
           </Select>
         </div>
         <button
@@ -605,9 +767,15 @@ function ReceiptHistory() {
 
       {viewing && (
         <div className="fixed inset-0 z-50">
+          {/* Backdrop — hidden when printing */}
           <div className="no-print absolute inset-0 bg-ink/50 animate-fade-in" onClick={() => setViewing(undefined)} />
-          <div className="no-print absolute inset-x-0 bottom-0 top-8 mx-auto flex max-w-2xl flex-col overflow-hidden rounded-t-2xl bg-paper shadow-pop sm:inset-y-8">
-            <div className="flex items-center justify-between border-b border-line bg-surface px-5 py-4">
+          {/*
+            Modal shell must NOT have no-print: the receipt preview lives inside it.
+            Print CSS uses visibility + #receipt-print-area; a parent with display:none
+            would hide the receipt entirely (this is why History Print was blank).
+          */}
+          <div className="absolute inset-x-0 bottom-0 top-8 mx-auto flex max-w-2xl flex-col overflow-hidden rounded-t-2xl bg-paper shadow-pop sm:inset-y-8">
+            <div className="no-print flex items-center justify-between border-b border-line bg-surface px-5 py-4">
               <h2 className="font-display text-base font-semibold text-ink">{viewing.receiptNumber}</h2>
               <button onClick={() => setViewing(undefined)} className="rounded-md p-1.5 text-muted hover:bg-paper hover:text-ink">
                 <X size={18} />
@@ -616,7 +784,7 @@ function ReceiptHistory() {
             <div className="flex-1 overflow-y-auto p-5">
               <ReceiptPreview receipt={viewing} />
             </div>
-            <div className="flex flex-wrap gap-2 border-t border-line bg-surface px-5 py-4">
+            <div className="no-print flex flex-wrap gap-2 border-t border-line bg-surface px-5 py-4">
               <button
                 onClick={() => window.print()}
                 className="flex items-center gap-1.5 rounded-md border border-line px-3.5 py-2 text-sm font-medium text-ink hover:bg-paper"
@@ -624,13 +792,29 @@ function ReceiptHistory() {
                 <Printer size={15} /> Print
               </button>
               <button
-                onClick={() => receiptToPdf(viewing)}
+                onClick={() => {
+                  try {
+                    receiptToPdf(viewing);
+                    toast.success("PDF downloaded");
+                  } catch (err) {
+                    console.error(err);
+                    toast.error("Could not generate PDF. Try again or use Print.");
+                  }
+                }}
                 className="flex items-center gap-1.5 rounded-md border border-line px-3.5 py-2 text-sm font-medium text-ink hover:bg-paper"
               >
                 <Download size={15} /> PDF
               </button>
               <button
-                onClick={() => receiptToExcel(viewing)}
+                onClick={() => {
+                  try {
+                    receiptToExcel(viewing);
+                    toast.success("Excel file downloaded");
+                  } catch (err) {
+                    console.error(err);
+                    toast.error("Could not export Excel.");
+                  }
+                }}
                 className="flex items-center gap-1.5 rounded-md border border-line px-3.5 py-2 text-sm font-medium text-ink hover:bg-paper"
               >
                 <FileSpreadsheet size={15} /> Excel

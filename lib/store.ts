@@ -3,7 +3,7 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import { toast } from "sonner";
-import { Category, Product, Receipt, ReceiptItem, ReceiptType, StockStatus, Supplier, Transaction } from "./types";
+import { Category, Customer, Product, Receipt, ReceiptItem, ReceiptType, StockStatus, Supplier, Transaction } from "./types";
 import { seedCategories, seedProducts, seedSuppliers, seedTransactions } from "./seed-data";
 import {
   isSupabaseConfigured,
@@ -18,6 +18,9 @@ import {
   dbInsertSupplier,
   dbUpdateSupplier,
   dbDeleteSupplier,
+  dbInsertCustomer,
+  dbUpdateCustomer,
+  dbDeleteCustomer,
   dbInsertReceipt,
   dbDeleteReceipt,
   dbAdjustProductQuantity,
@@ -39,6 +42,7 @@ type State = {
   products: Product[];
   categories: Category[];
   suppliers: Supplier[];
+  customers: Customer[];
   transactions: Transaction[];
   receipts: Receipt[];
   hasHydrated: boolean;
@@ -66,6 +70,12 @@ type State = {
   updateSupplier: (id: string, s: Partial<Supplier>) => void;
   deleteSupplier: (id: string) => void;
 
+  addCustomer: (c: Omit<Customer, "id" | "createdAt">) => Customer;
+  updateCustomer: (id: string, c: Partial<Customer>) => void;
+  deleteCustomer: (id: string) => void;
+  /** Find by name (case-insensitive) or create and return. */
+  upsertCustomerByName: (c: Omit<Customer, "id" | "createdAt">) => Customer;
+
   addTransaction: (t: Omit<Transaction, "id" | "date"> & { date?: string }) => void;
 
   addReceipt: (r: {
@@ -92,6 +102,42 @@ function nextReceiptNumber(type: ReceiptType, existing: Receipt[]) {
   return `${prefix}-${year}-${String(count).padStart(4, "0")}`;
 }
 
+
+/** Lifetime received never shrinks. Prefer stored total; recover from sales if missing. */
+function resolveTotalReceived(product: Product, receipts: Receipt[]): number {
+  let sold = 0;
+  for (const r of receipts) {
+    if (r.type !== "sale") continue;
+    for (const item of r.items) {
+      if (item.productId === product.id) sold += item.quantity;
+    }
+  }
+  const recovered = product.quantity + sold;
+  const stored = product.totalReceived ?? product.quantity;
+  return Math.max(stored, recovered, product.quantity);
+}
+
+function mergeProductPreserveTotals(prev: Product | undefined, incoming: Product, receipts: Receipt[]): Product {
+  const base = { ...incoming };
+  const candidates = [
+    base.totalReceived ?? 0,
+    base.quantity,
+    prev?.totalReceived ?? 0,
+  ];
+  // Recover from sale history so "total added" survives if DB column is missing
+  let sold = 0;
+  for (const r of receipts) {
+    if (r.type !== "sale") continue;
+    for (const item of r.items) {
+      if (item.productId === base.id) sold += item.quantity;
+    }
+  }
+  candidates.push(base.quantity + sold);
+  base.totalReceived = Math.max(...candidates);
+  return base;
+}
+
+
 let realtimeStarted = false;
 
 export const useStore = create<State>()(
@@ -100,6 +146,7 @@ export const useStore = create<State>()(
       products: isSupabaseConfigured ? [] : seedProducts,
       categories: isSupabaseConfigured ? [] : seedCategories,
       suppliers: isSupabaseConfigured ? [] : seedSuppliers,
+      customers: [],
       transactions: isSupabaseConfigured ? [] : seedTransactions,
       receipts: [],
       hasHydrated: false,
@@ -122,11 +169,16 @@ export const useStore = create<State>()(
         }
         try {
           const data = await fetchAllFromSupabase();
+          const receipts = data.receipts;
+          const products = data.products.map((prod) =>
+            mergeProductPreserveTotals(undefined, prod, receipts)
+          );
           set({
-            products: data.products,
+            products,
             categories: data.categories,
             suppliers: data.suppliers,
-            receipts: data.receipts,
+            customers: data.customers ?? [],
+            receipts,
             supabaseSynced: true,
             supabaseError: null,
           });
@@ -144,8 +196,10 @@ export const useStore = create<State>()(
                 products: deleted
                   ? s.products.filter((p) => p.id !== row.id)
                   : s.products.some((p) => p.id === row.id)
-                  ? s.products.map((p) => (p.id === row.id ? row : p))
-                  : [row, ...s.products],
+                  ? s.products.map((p) =>
+                      p.id === row.id ? mergeProductPreserveTotals(p, row, s.receipts) : p
+                    )
+                  : [mergeProductPreserveTotals(undefined, row, s.receipts), ...s.products],
               })),
             onCategory: (row, deleted) =>
               set((s) => ({
@@ -163,6 +217,14 @@ export const useStore = create<State>()(
                   ? s.suppliers.map((sup) => (sup.id === row.id ? row : sup))
                   : [...s.suppliers, row],
               })),
+            onCustomer: (row, deleted) =>
+              set((s) => ({
+                customers: deleted
+                  ? s.customers.filter((c) => c.id !== row.id)
+                  : s.customers.some((c) => c.id === row.id)
+                  ? s.customers.map((c) => (c.id === row.id ? row : c))
+                  : [row, ...s.customers],
+              })),
             onReceipt: (row, deleted) =>
               set((s) => ({
                 receipts: deleted
@@ -176,7 +238,12 @@ export const useStore = create<State>()(
       },
 
       addProduct: (p) => {
-        const product: Product = { ...p, id: makeId("p"), createdAt: new Date().toISOString().slice(0, 10) };
+        const product: Product = {
+          ...p,
+          id: makeId("p"),
+          createdAt: new Date().toISOString().slice(0, 10),
+          totalReceived: p.totalReceived ?? p.quantity,
+        };
         set((s) => ({ products: [product, ...s.products] }));
         if (isSupabaseConfigured) {
           dbInsertProduct(product).catch((err) => {
@@ -186,9 +253,22 @@ export const useStore = create<State>()(
         }
       },
       updateProduct: (id, p) => {
-        set((s) => ({ products: s.products.map((x) => (x.id === id ? { ...x, ...p } : x)) }));
+        const prev = get().products.find((x) => x.id === id);
+        let patch: Partial<Product> = { ...p };
+        if (prev) {
+          if (p.quantity !== undefined && p.totalReceived === undefined && p.quantity > prev.quantity) {
+            const delta = p.quantity - prev.quantity;
+            patch.totalReceived = (prev.totalReceived ?? prev.quantity) + delta;
+          }
+          const nextQty = p.quantity ?? prev.quantity;
+          const nextTotal = patch.totalReceived ?? prev.totalReceived ?? prev.quantity;
+          if (nextTotal < nextQty) {
+            patch.totalReceived = nextQty;
+          }
+        }
+        set((s) => ({ products: s.products.map((x) => (x.id === id ? { ...x, ...patch } : x)) }));
         if (isSupabaseConfigured) {
-          dbUpdateProduct(id, p).catch((err) => {
+          dbUpdateProduct(id, patch).catch((err) => {
             toast.error("Couldn't update product in Supabase");
             console.error(err);
           });
@@ -264,6 +344,60 @@ export const useStore = create<State>()(
         }
       },
 
+      addCustomer: (c) => {
+        const customer: Customer = {
+          ...c,
+          id: makeId("cust"),
+          createdAt: new Date().toISOString().slice(0, 10),
+        };
+        set((s) => ({ customers: [customer, ...s.customers] }));
+        if (isSupabaseConfigured) {
+          dbInsertCustomer(customer).catch((err) => {
+            toast.error("Couldn't save customer to Supabase");
+            console.error(err);
+          });
+        }
+        return customer;
+      },
+      updateCustomer: (id, c) => {
+        set((s) => ({ customers: s.customers.map((x) => (x.id === id ? { ...x, ...c } : x)) }));
+        if (isSupabaseConfigured) {
+          dbUpdateCustomer(id, c).catch((err) => {
+            toast.error("Couldn't update customer in Supabase");
+            console.error(err);
+          });
+        }
+      },
+      deleteCustomer: (id) => {
+        set((s) => ({ customers: s.customers.filter((x) => x.id !== id) }));
+        if (isSupabaseConfigured) {
+          dbDeleteCustomer(id).catch((err) => {
+            toast.error("Couldn't delete customer in Supabase");
+            console.error(err);
+          });
+        }
+      },
+      upsertCustomerByName: (c) => {
+        const name = c.name.trim();
+        if (!name) {
+          return { id: "", name: "", contact: "", address: "", createdAt: "" };
+        }
+        const existing = get().customers.find((x) => x.name.toLowerCase() === name.toLowerCase());
+        if (existing) {
+          const patch = {
+            contact: c.contact.trim() || existing.contact,
+            address: c.address.trim() || existing.address,
+          };
+          get().updateCustomer(existing.id, patch);
+          return { ...existing, ...patch };
+        }
+        return get().addCustomer({
+          name,
+          contact: c.contact.trim(),
+          address: c.address.trim(),
+        });
+      },
+
       // Internal ledger used to move stock quantities. Populated
       // automatically by addReceipt below. Only persisted locally — the
       // receipt itself is the durable record in Supabase.
@@ -272,14 +406,23 @@ export const useStore = create<State>()(
         const delta = t.type === "out" ? -t.quantity : t.quantity;
         const current = get().products.find((p) => p.id === t.productId);
         const newQuantity = Math.max(0, (current?.quantity ?? 0) + delta);
+        // Purchases / stock-in increase lifetime received; sales do not decrease it
+        const newTotalReceived =
+          t.type === "out"
+            ? current?.totalReceived ?? current?.quantity ?? 0
+            : (current?.totalReceived ?? current?.quantity ?? 0) + t.quantity;
 
         set((s) => ({
           transactions: [transaction, ...s.transactions],
-          products: s.products.map((p) => (p.id === t.productId ? { ...p, quantity: newQuantity } : p)),
+          products: s.products.map((p) =>
+            p.id === t.productId
+              ? { ...p, quantity: newQuantity, totalReceived: Math.max(newTotalReceived, newQuantity) }
+              : p
+          ),
         }));
 
         if (isSupabaseConfigured) {
-          dbAdjustProductQuantity(t.productId, newQuantity).catch((err) => {
+          dbAdjustProductQuantity(t.productId, newQuantity, Math.max(newTotalReceived, newQuantity)).catch((err) => {
             toast.error("Couldn't update stock quantity in Supabase");
             console.error(err);
           });
@@ -359,6 +502,7 @@ export const useStore = create<State>()(
               products: s.products,
               categories: s.categories,
               suppliers: s.suppliers,
+              customers: s.customers,
               transactions: s.transactions,
               receipts: s.receipts,
               currency: s.currency,
@@ -372,9 +516,14 @@ export const useStore = create<State>()(
             ...current,
             transactions: p.transactions ?? current.transactions,
             currency: p.currency ?? current.currency,
+            // customers come from Supabase only when configured
           };
         }
-        return { ...current, ...p };
+        const products = (p.products ?? current.products).map((prod) => ({
+          ...prod,
+          totalReceived: prod.totalReceived ?? prod.quantity,
+        }));
+        return { ...current, ...p, products };
       },
       onRehydrateStorage: () => (state) => {
         state?.setHasHydrated(true);

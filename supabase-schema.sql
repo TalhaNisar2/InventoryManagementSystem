@@ -23,6 +23,14 @@ create table if not exists suppliers (
   lead_time_days int
 );
 
+create table if not exists customers (
+  id text primary key,
+  name text not null,
+  contact text,
+  address text,
+  created_at timestamptz default now()
+);
+
 create table if not exists products (
   id text primary key,
   sku text unique not null,
@@ -33,6 +41,7 @@ create table if not exists products (
   cost_price numeric not null default 0,
   sell_price numeric not null default 0,
   quantity int not null default 0,
+  total_received int not null default 0,
   reorder_level int not null default 0,
   location text,
   created_at timestamptz default now()
@@ -63,6 +72,7 @@ create table if not exists receipts (
 
 alter table categories enable row level security;
 alter table suppliers  enable row level security;
+alter table customers  enable row level security;
 alter table products   enable row level security;
 alter table receipts   enable row level security;
 
@@ -72,6 +82,10 @@ create policy "allow all - categories" on categories
 
 drop policy if exists "allow all - suppliers" on suppliers;
 create policy "allow all - suppliers" on suppliers
+  for all using (true) with check (true);
+
+drop policy if exists "allow all - customers" on customers;
+create policy "allow all - customers" on customers
   for all using (true) with check (true);
 
 drop policy if exists "allow all - products" on products;
@@ -99,6 +113,10 @@ begin
   exception when duplicate_object then null;
   end;
   begin
+    alter publication supabase_realtime add table customers;
+  exception when duplicate_object then null;
+  end;
+  begin
     alter publication supabase_realtime add table products;
   exception when duplicate_object then null;
   end;
@@ -112,4 +130,31 @@ end $$;
 -- Done. Your tables start empty — nothing here inserts demo/dummy
 -- data. Add NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY
 -- to .env.local in the app and it will connect automatically.
+-- ============================================================
+
+
+-- ============================================================
+-- Migration (existing projects only)
+-- If you already ran the schema above before total_received existed,
+-- run this once in the SQL Editor:
+--
+--   alter table products add column if not exists total_received int not null default 0;
+--   update products set total_received = quantity where total_received = 0;
+-- ============================================================
+
+-- ============================================================
+-- Migration: customers (existing projects)
+--
+--   create table if not exists customers (
+--     id text primary key,
+--     name text not null,
+--     contact text,
+--     address text,
+--     created_at timestamptz default now()
+--   );
+--   alter table customers enable row level security;
+--   drop policy if exists "allow all - customers" on customers;
+--   create policy "allow all - customers" on customers
+--     for all using (true) with check (true);
+--   alter publication supabase_realtime add table customers;
 -- ============================================================

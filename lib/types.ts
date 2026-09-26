@@ -5,6 +5,14 @@ export type Category = {
   color: string;
 };
 
+export type Customer = {
+  id: string;
+  name: string;
+  contact: string;
+  address: string;
+  createdAt: string;
+};
+
 export type Supplier = {
   id: string;
   name: string;
@@ -24,7 +32,13 @@ export type Product = {
   unit: string;
   costPrice: number;
   sellPrice: number;
+  /** Current available stock */
   quantity: number;
+  /**
+   * Lifetime units received (purchases + initial stock + manual restocks).
+   * Used to show "available / total" e.g. 80/280. Never decreases on sales.
+   */
+  totalReceived: number;
   reorderLevel: number;
   location: string;
   createdAt: string;

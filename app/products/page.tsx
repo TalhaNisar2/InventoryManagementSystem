@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useMemo, useState } from "react";
+import { Suspense, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { Package, Plus, Search, SquarePen, Trash2 } from "lucide-react";
 import { toast } from "sonner";
@@ -34,6 +34,17 @@ function ProductsView() {
   const [categoryFilter, setCategoryFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState(searchParams.get("status") ?? "all");
   const [page, setPage] = useState(1);
+
+  // Keep local filters in sync when Topbar (or any link) navigates with ?q= / ?status=
+  // Without this, useState only reads the URL on first mount, so a second search
+  // while already on /products appears to "do nothing" until you leave and come back.
+  useEffect(() => {
+    const q = searchParams.get("q") ?? "";
+    const status = searchParams.get("status") ?? "all";
+    setQuery(q);
+    setStatusFilter(status);
+    setPage(1);
+  }, [searchParams]);
 
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [editing, setEditing] = useState<Product | undefined>(undefined);
@@ -179,20 +190,35 @@ function ProductsView() {
                     <span className="text-line">·</span>
                     <span className="text-muted">{supplier?.name ?? "No supplier"}</span>
                   </div>
-                  <div className="mt-3 grid grid-cols-3 gap-2 rounded-md bg-paper p-2.5 text-center text-xs">
+                  <div className="mt-3 grid grid-cols-2 gap-2 rounded-md bg-paper p-2.5 text-center text-xs sm:grid-cols-3">
                     <div>
+                      <p className="text-muted">Available</p>
+                      <p className="mt-0.5 font-medium text-ink">
+                        {formatNumber(p.quantity)} <span className="text-muted">{p.unit}</span>
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-muted">Sold</p>
+                      <p className="mt-0.5 font-medium text-ink">
+                        {formatNumber(Math.max(0, (p.totalReceived ?? p.quantity) - p.quantity))}{" "}
+                        <span className="text-muted">{p.unit}</span>
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-muted">Total added</p>
+                      <p className="mt-0.5 font-semibold text-ink">
+                        {formatNumber(p.totalReceived ?? p.quantity)} <span className="text-muted font-normal">{p.unit}</span>
+                      </p>
+                    </div>
+                  </div>
+                  <div className="mt-2 grid grid-cols-2 gap-2 text-center text-xs">
+                    <div className="rounded-md bg-paper p-2">
                       <p className="text-muted">Cost</p>
                       <p className="mt-0.5 font-medium text-ink">{formatCurrency(p.costPrice, currency)}</p>
                     </div>
-                    <div>
+                    <div className="rounded-md bg-paper p-2">
                       <p className="text-muted">Sell</p>
                       <p className="mt-0.5 font-medium text-ink">{formatCurrency(p.sellPrice, currency)}</p>
-                    </div>
-                    <div>
-                      <p className="text-muted">Stock</p>
-                      <p className="mt-0.5 font-medium text-ink">
-                        {formatNumber(p.quantity)} {p.unit}
-                      </p>
                     </div>
                   </div>
                   <div className="mt-3 flex items-center justify-end gap-1.5">
@@ -219,23 +245,27 @@ function ProductsView() {
             <div className="overflow-x-auto scrollbar-thin">
               <table className="w-full text-left text-sm">
                 <colgroup>
-                  <col className="w-[26%]" />
-                  <col className="w-[13%]" />
-                  <col className="w-[10%]" />
-                  <col className="w-[11%]" />
-                  <col className="w-[10%]" />
+                  <col className="w-[20%]" />
+                  <col className="w-[12%]" />
                   <col className="w-[10%]" />
                   <col className="w-[9%]" />
                   <col className="w-[11%]" />
+                  <col className="w-[9%]" />
+                  <col className="w-[9%]" />
+                  <col className="w-[9%]" />
+                  <col className="w-[7%]" />
+                  <col className="w-[4%]" />
                 </colgroup>
                 <thead>
                   <tr className="border-b border-line bg-paper/60 text-xs text-muted">
                     <th className="px-5 py-3 font-medium">Product</th>
                     <th className="px-5 py-3 font-medium">Category</th>
-                    <th className="px-5 py-3 font-medium">Stock</th>
+                    <th className="px-5 py-3 font-medium">Available</th>
+                    <th className="px-5 py-3 font-medium">Sold</th>
+                    <th className="px-5 py-3 font-medium">Total added</th>
                     <th className="px-5 py-3 font-medium">Status</th>
-                    <th className="px-5 py-3 font-medium">Cost price</th>
-                    <th className="px-5 py-3 font-medium">Sell price</th>
+                    <th className="px-5 py-3 font-medium">Cost</th>
+                    <th className="px-5 py-3 font-medium">Sell</th>
                     <th className="px-5 py-3 font-medium">Margin</th>
                     <th className="px-5 py-3 font-medium text-right">Actions</th>
                   </tr>
@@ -266,6 +296,13 @@ function ProductsView() {
                         </td>
                         <td className="px-5 py-3.5 text-ink">
                           {formatNumber(p.quantity)} <span className="text-muted">{p.unit}</span>
+                        </td>
+                        <td className="px-5 py-3.5 text-ink">
+                          {formatNumber(Math.max(0, (p.totalReceived ?? p.quantity) - p.quantity))}{" "}
+                          <span className="text-muted">{p.unit}</span>
+                        </td>
+                        <td className="px-5 py-3.5 font-medium text-ink">
+                          {formatNumber(p.totalReceived ?? p.quantity)} <span className="text-muted font-normal">{p.unit}</span>
                         </td>
                         <td className="px-5 py-3.5">
                           <StatusBadge status={status} />

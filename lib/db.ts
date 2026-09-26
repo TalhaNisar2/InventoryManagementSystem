@@ -1,5 +1,5 @@
 import { supabase, isSupabaseConfigured } from "./supabase";
-import { Category, Product, Receipt, ReceiptItem, Supplier } from "./types";
+import { Category, Customer, Product, Receipt, ReceiptItem, Supplier } from "./types";
 
 /**
  * Everything that actually talks to Supabase lives here. `lib/store.ts`
@@ -24,12 +24,15 @@ type ProductRow = {
   cost_price: number;
   sell_price: number;
   quantity: number;
+  total_received?: number;
   reorder_level: number;
   location: string;
   created_at: string;
 };
 
 function productFromRow(r: ProductRow): Product {
+  const qty = Number(r.quantity);
+  const total = r.total_received != null ? Number(r.total_received) : qty;
   return {
     id: r.id,
     sku: r.sku,
@@ -39,7 +42,8 @@ function productFromRow(r: ProductRow): Product {
     unit: r.unit,
     costPrice: Number(r.cost_price),
     sellPrice: Number(r.sell_price),
-    quantity: Number(r.quantity),
+    quantity: qty,
+    totalReceived: Math.max(total, qty),
     reorderLevel: Number(r.reorder_level),
     location: r.location,
     createdAt: (r.created_at ?? "").slice(0, 10),
@@ -57,6 +61,7 @@ function productToRow(p: Partial<Product>) {
   if (p.costPrice !== undefined) row.cost_price = p.costPrice;
   if (p.sellPrice !== undefined) row.sell_price = p.sellPrice;
   if (p.quantity !== undefined) row.quantity = p.quantity;
+  if (p.totalReceived !== undefined) row.total_received = p.totalReceived;
   if (p.reorderLevel !== undefined) row.reorder_level = p.reorderLevel;
   if (p.location !== undefined) row.location = p.location;
   return row;
@@ -93,6 +98,35 @@ function supplierToRow(s: Partial<Supplier>) {
   if (s.phone !== undefined) row.phone = s.phone;
   if (s.address !== undefined) row.address = s.address;
   if (s.leadTimeDays !== undefined) row.lead_time_days = s.leadTimeDays;
+  return row;
+}
+
+
+type CustomerRow = {
+  id: string;
+  name: string;
+  contact: string | null;
+  address: string | null;
+  created_at: string | null;
+};
+
+function customerFromRow(r: CustomerRow): Customer {
+  return {
+    id: r.id,
+    name: r.name ?? "",
+    contact: r.contact ?? "",
+    address: r.address ?? "",
+    createdAt: (r.created_at ?? "").slice(0, 10),
+  };
+}
+
+function customerToRow(c: Partial<Customer>) {
+  const row: Record<string, unknown> = {};
+  if (c.id !== undefined) row.id = c.id;
+  if (c.name !== undefined) row.name = c.name;
+  if (c.contact !== undefined) row.contact = c.contact;
+  if (c.address !== undefined) row.address = c.address;
+  if (c.createdAt !== undefined) row.created_at = c.createdAt;
   return row;
 }
 
@@ -169,23 +203,31 @@ function receiptToRow(r: Receipt) {
 export async function fetchAllFromSupabase() {
   if (!supabase) throw new Error("Supabase is not configured");
 
-  const [productsRes, categoriesRes, suppliersRes, receiptsRes] = await Promise.all([
+  const [productsRes, categoriesRes, suppliersRes, receiptsRes, customersRes] = await Promise.all([
     supabase.from("products").select("*").order("created_at", { ascending: false }),
     supabase.from("categories").select("*"),
     supabase.from("suppliers").select("*"),
     supabase.from("receipts").select("*").order("date", { ascending: false }),
+    supabase.from("customers").select("*").order("created_at", { ascending: false }),
   ]);
 
   if (productsRes.error) throw productsRes.error;
   if (categoriesRes.error) throw categoriesRes.error;
   if (suppliersRes.error) throw suppliersRes.error;
   if (receiptsRes.error) throw receiptsRes.error;
+  // customers table may not exist until migration — don't hard-fail the whole app
+  if (customersRes.error) {
+    console.warn("customers fetch:", customersRes.error.message);
+  }
 
   return {
     products: (productsRes.data as ProductRow[]).map(productFromRow),
     categories: (categoriesRes.data as Category[]).map(categoryFromRow),
     suppliers: (suppliersRes.data as SupplierRow[]).map(supplierFromRow),
     receipts: (receiptsRes.data as ReceiptRow[]).map(receiptFromRow),
+    customers: customersRes.error
+      ? []
+      : ((customersRes.data as CustomerRow[]) ?? []).map(customerFromRow),
   };
 }
 
@@ -247,6 +289,25 @@ export async function dbDeleteSupplier(id: string) {
   if (error) throw error;
 }
 
+
+export async function dbInsertCustomer(c: Customer) {
+  if (!supabase) throw new Error("Supabase is not configured");
+  const { error } = await supabase.from("customers").insert(customerToRow(c));
+  if (error) throw error;
+}
+
+export async function dbUpdateCustomer(id: string, patch: Partial<Customer>) {
+  if (!supabase) throw new Error("Supabase is not configured");
+  const { error } = await supabase.from("customers").update(customerToRow(patch)).eq("id", id);
+  if (error) throw error;
+}
+
+export async function dbDeleteCustomer(id: string) {
+  if (!supabase) throw new Error("Supabase is not configured");
+  const { error } = await supabase.from("customers").delete().eq("id", id);
+  if (error) throw error;
+}
+
 export async function dbInsertReceipt(r: Receipt) {
   if (!supabase) throw new Error("Supabase is not configured");
   const { error } = await supabase.from("receipts").insert(receiptToRow(r));
@@ -260,8 +321,18 @@ export async function dbDeleteReceipt(id: string) {
 }
 
 /** Used when a receipt is saved: moves stock for every line item. */
-export async function dbAdjustProductQuantity(id: string, newQuantity: number) {
+export async function dbAdjustProductQuantity(id: string, newQuantity: number, totalReceived?: number) {
   if (!supabase) throw new Error("Supabase is not configured");
+  // Prefer writing total_received; if the column was never migrated, fall back to quantity-only.
+  if (totalReceived !== undefined) {
+    const withTotal = await supabase
+      .from("products")
+      .update({ quantity: newQuantity, total_received: totalReceived })
+      .eq("id", id);
+    if (!withTotal.error) return;
+    // Column missing or other schema issue — still update quantity so stock stays correct.
+    console.warn("total_received update failed, writing quantity only:", withTotal.error.message);
+  }
   const { error } = await supabase.from("products").update({ quantity: newQuantity }).eq("id", id);
   if (error) throw error;
 }
@@ -274,6 +345,7 @@ export type RealtimeHandlers = {
   onProduct: (row: Product, deleted?: boolean) => void;
   onCategory: (row: Category, deleted?: boolean) => void;
   onSupplier: (row: Supplier, deleted?: boolean) => void;
+  onCustomer: (row: Customer, deleted?: boolean) => void;
   onReceipt: (row: Receipt, deleted?: boolean) => void;
 };
 
@@ -312,6 +384,17 @@ export function subscribeRealtime(handlers: RealtimeHandlers) {
           handlers.onSupplier(supplierFromRow(payload.old as SupplierRow), true);
         } else {
           handlers.onSupplier(supplierFromRow(payload.new as SupplierRow));
+        }
+      }
+    )
+    .on(
+      "postgres_changes",
+      { event: "*", schema: "public", table: "customers" },
+      (payload) => {
+        if (payload.eventType === "DELETE") {
+          handlers.onCustomer(customerFromRow(payload.old as CustomerRow), true);
+        } else {
+          handlers.onCustomer(customerFromRow(payload.new as CustomerRow));
         }
       }
     )
