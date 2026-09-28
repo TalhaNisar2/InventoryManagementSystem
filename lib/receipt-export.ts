@@ -2,7 +2,7 @@ import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 import * as XLSX from "xlsx";
 import { Receipt } from "./types";
-import { formatCurrency, formatDate } from "./utils";
+import { formatCurrency, formatDate, formatDateTime } from "./utils";
 import { useStore } from "./store";
 
 function getCurrency() {
@@ -77,7 +77,7 @@ export function receiptToPdf(r: Receipt) {
     doc.setFontSize(8.5);
     doc.setTextColor(190, 195, 212);
     doc.text(`Receipt #: ${r.receiptNumber}`, contentRight, 50, { align: "right" });
-    doc.text(`Date: ${formatDate(r.date)}`, contentRight, 63, { align: "right" });
+    doc.text(`Date: ${formatDateTime(r.date)}`, contentRight, 63, { align: "right" });
 
     if (continued) {
       doc.setFont("helvetica", "italic");
@@ -280,7 +280,7 @@ export function receiptToExcel(r: Receipt) {
     [heading(r)],
     [],
     ["Receipt #", r.receiptNumber],
-    ["Date", formatDate(r.date)],
+    ["Date", formatDateTime(r.date)],
     ["Currency", currency],
     [partyLabel(r), r.partyName],
     ["Contact", r.partyContact],
@@ -308,7 +308,7 @@ export function receiptsToExcel(receipts: Receipt[]) {
   const rows = receipts.map((r) => ({
     "Receipt #": r.receiptNumber,
     Type: r.type === "sale" ? "Sale" : "Purchase",
-    Date: formatDate(r.date),
+    Date: formatDateTime(r.date),
     Party: r.partyName,
     Items: r.items.length,
     Currency: currency,

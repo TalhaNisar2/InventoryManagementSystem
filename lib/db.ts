@@ -55,8 +55,9 @@ function productToRow(p: Partial<Product>) {
   if (p.id !== undefined) row.id = p.id;
   if (p.sku !== undefined) row.sku = p.sku;
   if (p.name !== undefined) row.name = p.name;
-  if (p.categoryId !== undefined) row.category_id = p.categoryId;
-  if (p.supplierId !== undefined) row.supplier_id = p.supplierId;
+  // Empty string breaks FK constraints — send null instead
+  if (p.categoryId !== undefined) row.category_id = p.categoryId || null;
+  if (p.supplierId !== undefined) row.supplier_id = p.supplierId || null;
   if (p.unit !== undefined) row.unit = p.unit;
   if (p.costPrice !== undefined) row.cost_price = p.costPrice;
   if (p.sellPrice !== undefined) row.sell_price = p.sellPrice;
@@ -64,6 +65,7 @@ function productToRow(p: Partial<Product>) {
   if (p.totalReceived !== undefined) row.total_received = p.totalReceived;
   if (p.reorderLevel !== undefined) row.reorder_level = p.reorderLevel;
   if (p.location !== undefined) row.location = p.location;
+  if (p.createdAt !== undefined) row.created_at = p.createdAt;
   return row;
 }
 
@@ -237,8 +239,12 @@ export async function fetchAllFromSupabase() {
 
 export async function dbInsertProduct(p: Product) {
   if (!supabase) throw new Error("Supabase is not configured");
-  const { error } = await supabase.from("products").insert(productToRow(p));
-  if (error) throw error;
+  const row = productToRow(p);
+  const { error } = await supabase.from("products").insert(row);
+  if (error) {
+    console.error("dbInsertProduct failed", error.message, error.details, error.hint, row);
+    throw error;
+  }
 }
 
 export async function dbUpdateProduct(id: string, patch: Partial<Product>) {
@@ -311,6 +317,12 @@ export async function dbDeleteCustomer(id: string) {
 export async function dbInsertReceipt(r: Receipt) {
   if (!supabase) throw new Error("Supabase is not configured");
   const { error } = await supabase.from("receipts").insert(receiptToRow(r));
+  if (error) throw error;
+}
+
+export async function dbUpdateReceipt(id: string, r: Receipt) {
+  if (!supabase) throw new Error("Supabase is not configured");
+  const { error } = await supabase.from("receipts").update(receiptToRow(r)).eq("id", id);
   if (error) throw error;
 }
 

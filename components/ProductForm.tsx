@@ -59,6 +59,8 @@ export default function ProductForm({
   const [newCategoryName, setNewCategoryName] = useState("");
   const [addingSupplier, setAddingSupplier] = useState(false);
   const [newSupplierName, setNewSupplierName] = useState("");
+  /** Units to add on top of current stock when editing (restock). */
+  const [addMore, setAddMore] = useState("");
 
   function set<K extends keyof FormValues>(key: K, val: string) {
     setValues((v) => ({ ...v, [key]: val }));
@@ -108,8 +110,11 @@ export default function ProductForm({
     ev.preventDefault();
     if (!validate()) return;
 
-    const qty = Math.round(Number(values.quantity));
-    const payload = {
+    const addQty = product ? Math.max(0, Math.round(Number(addMore) || 0)) : 0;
+    const baseQty = Math.round(Number(values.quantity));
+    // When editing, quantity on hand = current field value + "add more" restock
+    const qty = product ? baseQty + addQty : baseQty;
+    const base = {
       name: values.name.trim(),
       sku: values.sku.trim().toUpperCase(),
       categoryId: values.categoryId,
@@ -118,21 +123,21 @@ export default function ProductForm({
       costPrice: Number(values.costPrice),
       sellPrice: Number(values.sellPrice),
       quantity: qty,
-      // New product: total added starts equal to opening stock.
-      // On edit, store bumps totalReceived when quantity increases.
-      totalReceived: product
-        ? Math.max(product.totalReceived ?? product.quantity, qty)
-        : qty,
       reorderLevel: Math.round(Number(values.reorderLevel)),
       location: values.location.trim() || "—",
     };
 
     if (product) {
-      updateProduct(product.id, payload);
-      toast.success(`${payload.name} updated`);
+      // Store bumps Total added when quantity increases vs previous
+      updateProduct(product.id, base);
+      if (addQty > 0) {
+        toast.success(`${base.name} updated — added ${addQty} ${base.unit} to stock`);
+      } else {
+        toast.success(`${base.name} updated`);
+      }
     } else {
-      addProduct(payload);
-      toast.success(`${payload.name} added`);
+      addProduct({ ...base, totalReceived: qty });
+      toast.success(`${base.name} added`);
     }
     onDone();
   }
@@ -286,26 +291,129 @@ export default function ProductForm({
         </p>
       )}
 
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-        <Field label="Quantity on hand">
-          <Input
-            type="number"
-            min="0"
-            value={values.quantity}
-            onChange={(e) => set("quantity", e.target.value)}
-          />
-          {errors.quantity && <p className="mt-1 text-xs text-danger">{errors.quantity}</p>}
-        </Field>
-        <Field label="Reorder level" hint="Alert when stock falls to this">
-          <Input
-            type="number"
-            min="0"
-            value={values.reorderLevel}
-            onChange={(e) => set("reorderLevel", e.target.value)}
-          />
-          {errors.reorderLevel && <p className="mt-1 text-xs text-danger">{errors.reorderLevel}</p>}
-        </Field>
-      </div>
+      {product ? (
+        <div className="space-y-3 rounded-xl border border-line bg-paper p-4">
+          <p className="text-sm font-semibold text-ink">Stock</p>
+          {(() => {
+            const currentAvail = Math.round(Number(values.quantity) || 0);
+            const currentTotal = product.totalReceived ?? product.quantity;
+            const currentSold = Math.max(0, currentTotal - product.quantity);
+            const addQty = Math.max(0, Math.round(Number(addMore) || 0));
+            const afterAvail = currentAvail + addQty;
+            const afterTotal = currentTotal + addQty;
+            const unit = values.unit.trim() || product.unit || "pcs";
+            return (
+              <>
+                <div className="grid grid-cols-3 gap-2 text-center text-xs">
+                  <div className="rounded-md bg-surface px-2 py-2">
+                    <p className="text-muted">Available</p>
+                    <p className="mt-0.5 font-semibold text-ink">
+                      {currentAvail} <span className="font-normal text-muted">{unit}</span>
+                    </p>
+                  </div>
+                  <div className="rounded-md bg-surface px-2 py-2">
+                    <p className="text-muted">Sold</p>
+                    <p className="mt-0.5 font-semibold text-ink">
+                      {currentSold} <span className="font-normal text-muted">{unit}</span>
+                    </p>
+                  </div>
+                  <div className="rounded-md bg-surface px-2 py-2">
+                    <p className="text-muted">Total added</p>
+                    <p className="mt-0.5 font-semibold text-ink">
+                      {currentTotal} <span className="font-normal text-muted">{unit}</span>
+                    </p>
+                  </div>
+                </div>
+
+                <Field label="Add more stock" hint="Restock — increases Available and Total added">
+                  <div className="flex flex-wrap gap-1.5">
+                    {[5, 10, 20, 50, 100].map((n) => (
+                      <button
+                        key={n}
+                        type="button"
+                        onClick={() => setAddMore(String(n))}
+                        className={
+                          "rounded-md border px-2.5 py-1.5 text-xs font-medium transition-colors " +
+                          (Number(addMore) === n
+                            ? "border-ink bg-ink text-white"
+                            : "border-line bg-surface text-ink hover:bg-paper")
+                        }
+                      >
+                        +{n}
+                      </button>
+                    ))}
+                  </div>
+                  <Input
+                    type="number"
+                    min="0"
+                    className="mt-2"
+                    value={addMore}
+                    onChange={(e) => setAddMore(e.target.value)}
+                    placeholder="Or type amount to add, e.g. 15"
+                  />
+                </Field>
+
+                {addQty > 0 && (
+                  <div className="rounded-md border border-accent/30 bg-accent-soft/40 px-3 py-2.5 text-xs text-ink">
+                    <p className="font-medium">After save</p>
+                    <p className="mt-1 text-muted">
+                      Available: <span className="font-semibold text-ink">{currentAvail}</span>
+                      {" → "}
+                      <span className="font-semibold text-success">{afterAvail}</span> {unit}
+                    </p>
+                    <p className="mt-0.5 text-muted">
+                      Total added: <span className="font-semibold text-ink">{currentTotal}</span>
+                      {" → "}
+                      <span className="font-semibold text-success">{afterTotal}</span> {unit}
+                    </p>
+                    <p className="mt-0.5 text-muted">Sold stays {currentSold} {unit}</p>
+                  </div>
+                )}
+
+                <Field label="Quantity on hand" hint="Current available — change only to correct a mistake">
+                  <Input
+                    type="number"
+                    min="0"
+                    value={values.quantity}
+                    onChange={(e) => set("quantity", e.target.value)}
+                  />
+                  {errors.quantity && <p className="mt-1 text-xs text-danger">{errors.quantity}</p>}
+                </Field>
+              </>
+            );
+          })()}
+          <Field label="Reorder level" hint="Alert when stock falls to this">
+            <Input
+              type="number"
+              min="0"
+              value={values.reorderLevel}
+              onChange={(e) => set("reorderLevel", e.target.value)}
+            />
+            {errors.reorderLevel && <p className="mt-1 text-xs text-danger">{errors.reorderLevel}</p>}
+          </Field>
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+          <Field label="Opening quantity" hint="Becomes both Available and Total added">
+            <Input
+              type="number"
+              min="0"
+              value={values.quantity}
+              onChange={(e) => set("quantity", e.target.value)}
+            />
+            {errors.quantity && <p className="mt-1 text-xs text-danger">{errors.quantity}</p>}
+          </Field>
+          <Field label="Reorder level" hint="Alert when stock falls to this">
+            <Input
+              type="number"
+              min="0"
+              value={values.reorderLevel}
+              onChange={(e) => set("reorderLevel", e.target.value)}
+            />
+            {errors.reorderLevel && <p className="mt-1 text-xs text-danger">{errors.reorderLevel}</p>}
+          </Field>
+        </div>
+      )}
 
       <Field label="Warehouse location" hint="Aisle-shelf reference, e.g. A1-04">
         <Input value={values.location} onChange={(e) => set("location", e.target.value)} placeholder="A1-04" />

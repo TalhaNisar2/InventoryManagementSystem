@@ -11,12 +11,13 @@ import {
   Receipt as ReceiptIcon,
   Search,
   ShieldCheck,
+  SquarePen,
   Trash2,
   X,
 } from "lucide-react";
 import { useStore } from "@/lib/store";
-import { formatCurrency, formatDate, cn } from "@/lib/utils";
-import { Receipt, ReceiptItem, ReceiptType } from "@/lib/types";
+import { formatCurrency, formatDateTime, cn } from "@/lib/utils";
+import { Product, Receipt, ReceiptItem, ReceiptType } from "@/lib/types";
 import { receiptToExcel, receiptToPdf, receiptsToExcel } from "@/lib/receipt-export";
 import PageHeader from "@/components/PageHeader";
 import ReceiptPreview from "@/components/ReceiptPreview";
@@ -629,11 +630,16 @@ function ReceiptBuilder({ onSaved }: { onSaved: () => void }) {
 function ReceiptHistory() {
   const receipts = useStore((s) => s.receipts);
   const customers = useStore((s) => s.customers);
+  const products = useStore((s) => s.products);
   const currency = useStore((s) => s.currency);
+  const deleteReceipt = useStore((s) => s.deleteReceipt);
+  const updateReceipt = useStore((s) => s.updateReceipt);
   const [query, setQuery] = useState("");
   const [typeFilter, setTypeFilter] = useState<"all" | ReceiptType>("all");
   const [contactFilter, setContactFilter] = useState("all");
   const [viewing, setViewing] = useState<Receipt | undefined>(undefined);
+  const [editing, setEditing] = useState<Receipt | undefined>(undefined);
+  const [deleteTarget, setDeleteTarget] = useState<Receipt | undefined>(undefined);
 
   const partyNames = useMemo(() => {
     const set = new Set<string>();
@@ -749,14 +755,28 @@ function ReceiptHistory() {
                   <td className="px-5 py-3.5 text-ink">{r.partyName || "—"}</td>
                   <td className="px-5 py-3.5 text-muted">{r.items.length}</td>
                   <td className="px-5 py-3.5 font-medium text-ink">{formatCurrency(r.total, currency)}</td>
-                  <td className="px-5 py-3.5 text-muted">{formatDate(r.date)}</td>
+                  <td className="px-5 py-3.5 text-muted">{formatDateTime(r.date)}</td>
                   <td className="px-5 py-3.5 text-right">
-                    <button
-                      onClick={() => setViewing(r)}
-                      className="rounded-md border border-line px-3 py-1.5 text-xs font-medium text-ink hover:bg-paper"
-                    >
-                      View
-                    </button>
+                    <div className="flex flex-wrap items-center justify-end gap-1.5">
+                      <button
+                        onClick={() => setViewing(r)}
+                        className="rounded-md border border-line px-3 py-1.5 text-xs font-medium text-ink hover:bg-paper"
+                      >
+                        View
+                      </button>
+                      <button
+                        onClick={() => setEditing(r)}
+                        className="rounded-md border border-line px-3 py-1.5 text-xs font-medium text-ink hover:bg-paper"
+                      >
+                        Edit
+                      </button>
+                      <button
+                        onClick={() => setDeleteTarget(r)}
+                        className="rounded-md border border-line px-3 py-1.5 text-xs font-medium text-danger hover:bg-danger-soft"
+                      >
+                        Delete
+                      </button>
+                    </div>
                   </td>
                 </tr>
               ))}
@@ -819,10 +839,244 @@ function ReceiptHistory() {
               >
                 <FileSpreadsheet size={15} /> Excel
               </button>
+              <button
+                onClick={() => {
+                  setViewing(undefined);
+                  setEditing(viewing);
+                }}
+                className="flex items-center gap-1.5 rounded-md border border-line px-3.5 py-2 text-sm font-medium text-ink hover:bg-paper"
+              >
+                <SquarePen size={15} /> Edit
+              </button>
+              <button
+                onClick={() => {
+                  setViewing(undefined);
+                  setDeleteTarget(viewing);
+                }}
+                className="flex items-center gap-1.5 rounded-md border border-line px-3.5 py-2 text-sm font-medium text-danger hover:bg-danger-soft"
+              >
+                <Trash2 size={15} /> Delete
+              </button>
             </div>
           </div>
         </div>
       )}
+
+      {editing && (
+        <ReceiptEditModal
+          receipt={editing}
+          products={products}
+          currency={currency}
+          onClose={() => setEditing(undefined)}
+          onSave={(patch) => {
+            updateReceipt(editing.id, patch);
+            toast.success(`${editing.receiptNumber} updated — stock adjusted`);
+            setEditing(undefined);
+          }}
+        />
+      )}
+
+      {deleteTarget && (
+        <div className="fixed inset-0 z-50 flex items-end justify-center sm:items-center">
+          <div className="absolute inset-0 bg-ink/50 animate-fade-in" onClick={() => setDeleteTarget(undefined)} />
+          <div className="relative w-full max-w-md rounded-t-2xl border border-line bg-surface p-5 shadow-pop sm:rounded-2xl">
+            <h3 className="font-display text-base font-semibold text-ink">Delete {deleteTarget.receiptNumber}?</h3>
+            <p className="mt-2 text-sm text-muted">
+              This removes the receipt and reverses its stock effect
+              ({deleteTarget.type === "sale" ? "stock will be restored" : "stock will be reduced"} for the line items).
+              This cannot be undone.
+            </p>
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                onClick={() => setDeleteTarget(undefined)}
+                className="rounded-md border border-line px-3.5 py-2 text-sm font-medium text-ink hover:bg-paper"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => {
+                  deleteReceipt(deleteTarget.id);
+                  toast.success(`${deleteTarget.receiptNumber} deleted`);
+                  setDeleteTarget(undefined);
+                  setViewing(undefined);
+                }}
+                className="rounded-md bg-danger px-3.5 py-2 text-sm font-medium text-white hover:opacity-90"
+              >
+                Delete
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ReceiptEditModal({
+  receipt,
+  products,
+  currency,
+  onClose,
+  onSave,
+}: {
+  receipt: Receipt;
+  products: Product[];
+  currency: string;
+  onClose: () => void;
+  onSave: (patch: {
+    partyName: string;
+    partyContact: string;
+    partyAddress: string;
+    items: ReceiptItem[];
+    discountPercent: number;
+    taxPercent: number;
+    note: string;
+  }) => void;
+}) {
+  const [partyName, setPartyName] = useState(receipt.partyName);
+  const [partyContact, setPartyContact] = useState(receipt.partyContact);
+  const [partyAddress, setPartyAddress] = useState(receipt.partyAddress);
+  const [note, setNote] = useState(receipt.note);
+  const [discountPercent, setDiscountPercent] = useState(String(receipt.discountPercent));
+  const [taxPercent, setTaxPercent] = useState(String(receipt.taxPercent));
+  const [items, setItems] = useState<ReceiptItem[]>(receipt.items.map((i) => ({ ...i })));
+
+  function updateItem(index: number, patch: Partial<ReceiptItem>) {
+    setItems((prev) => prev.map((it, i) => (i === index ? { ...it, ...patch } : it)));
+  }
+
+  function removeItem(index: number) {
+    setItems((prev) => prev.filter((_, i) => i !== index));
+  }
+
+  function handleSave() {
+    if (items.length === 0) {
+      toast.error("Keep at least one item on the receipt.");
+      return;
+    }
+    for (const it of items) {
+      if (!it.quantity || it.quantity <= 0) {
+        toast.error(`Enter a valid quantity for ${it.name}.`);
+        return;
+      }
+      if (receipt.type === "sale") {
+        const product = products.find((p) => p.id === it.productId);
+        const originalQty = receipt.items
+          .filter((x) => x.productId === it.productId)
+          .reduce((s, x) => s + x.quantity, 0);
+        const maxAllowed = (product?.quantity ?? 0) + originalQty;
+        if (it.quantity > maxAllowed) {
+          toast.error(`Only ${maxAllowed} ${it.unit} of ${it.name} available (including this receipt).`);
+          return;
+        }
+      }
+    }
+    onSave({
+      partyName: partyName.trim(),
+      partyContact: partyContact.trim(),
+      partyAddress: partyAddress.trim(),
+      items,
+      discountPercent: Number(discountPercent) || 0,
+      taxPercent: Number(taxPercent) || 0,
+      note: note.trim(),
+    });
+  }
+
+  return (
+    <div className="fixed inset-0 z-50">
+      <div className="absolute inset-0 bg-ink/50 animate-fade-in" onClick={onClose} />
+      <div className="absolute inset-x-0 bottom-0 top-8 mx-auto flex max-w-2xl flex-col overflow-hidden rounded-t-2xl bg-paper shadow-pop sm:inset-y-8">
+        <div className="flex items-center justify-between border-b border-line bg-surface px-5 py-4">
+          <div>
+            <h2 className="font-display text-base font-semibold text-ink">Edit {receipt.receiptNumber}</h2>
+            <p className="text-xs text-muted">Stock will be recalculated when you save</p>
+          </div>
+          <button onClick={onClose} className="rounded-md p-1.5 text-muted hover:bg-paper hover:text-ink">
+            <X size={18} />
+          </button>
+        </div>
+        <div className="flex-1 space-y-4 overflow-y-auto p-5">
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <Field label={receipt.type === "sale" ? "Customer name" : "Supplier name"}>
+              <Input value={partyName} onChange={(e) => setPartyName(e.target.value)} />
+            </Field>
+            <Field label="Contact">
+              <Input value={partyContact} onChange={(e) => setPartyContact(e.target.value)} />
+            </Field>
+          </div>
+          <Field label="Address">
+            <Textarea rows={2} value={partyAddress} onChange={(e) => setPartyAddress(e.target.value)} />
+          </Field>
+
+          <div>
+            <h3 className="text-sm font-semibold text-ink">Items</h3>
+            <div className="mt-2 space-y-3">
+              {items.map((item, i) => (
+                <div key={`${item.productId}-${i}`} className="rounded-md border border-line p-3">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <p className="text-sm font-medium text-ink">{item.name}</p>
+                      <p className="text-xs text-muted">{item.sku}</p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => removeItem(i)}
+                      className="rounded-md p-1.5 text-muted hover:bg-danger-soft hover:text-danger"
+                    >
+                      <Trash2 size={14} />
+                    </button>
+                  </div>
+                  <div className="mt-2 grid grid-cols-2 gap-2">
+                    <label className="block">
+                      <span className="mb-1 block text-xs text-muted">Quantity</span>
+                      <input
+                        type="number"
+                        min="1"
+                        value={item.quantity}
+                        onChange={(e) =>
+                          updateItem(i, { quantity: Math.max(0, Math.round(Number(e.target.value))) })
+                        }
+                        className="w-full rounded-md border border-line bg-paper px-2.5 py-1.5 text-sm text-ink focus:border-accent/50 focus:outline-none"
+                      />
+                    </label>
+                    <label className="block">
+                      <span className="mb-1 block text-xs text-muted">Unit price</span>
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        value={item.unitPrice}
+                        onChange={(e) => updateItem(i, { unitPrice: Math.max(0, Number(e.target.value)) })}
+                        className="w-full rounded-md border border-line bg-paper px-2.5 py-1.5 text-sm text-ink focus:border-accent/50 focus:outline-none"
+                      />
+                    </label>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="Discount %">
+              <Input type="number" min="0" max="100" value={discountPercent} onChange={(e) => setDiscountPercent(e.target.value)} />
+            </Field>
+            <Field label="Tax %">
+              <Input type="number" min="0" max="100" value={taxPercent} onChange={(e) => setTaxPercent(e.target.value)} />
+            </Field>
+          </div>
+          <Field label="Note">
+            <Textarea rows={2} value={note} onChange={(e) => setNote(e.target.value)} />
+          </Field>
+        </div>
+        <div className="flex justify-end gap-2 border-t border-line bg-surface px-5 py-4">
+          <button onClick={onClose} className="rounded-md border border-line px-3.5 py-2 text-sm font-medium text-ink hover:bg-paper">
+            Cancel
+          </button>
+          <button onClick={handleSave} className="rounded-md bg-ink px-3.5 py-2 text-sm font-medium text-white hover:bg-ink-soft">
+            Save changes
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

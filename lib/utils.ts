@@ -31,11 +31,15 @@ export function formatDate(iso: string) {
 
 export function formatDateTime(iso: string) {
   const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso || "—";
   return new Intl.DateTimeFormat("en-US", {
     month: "short",
     day: "numeric",
+    year: "numeric",
     hour: "numeric",
     minute: "2-digit",
+    second: "2-digit",
+    hour12: true,
   }).format(d);
 }
 

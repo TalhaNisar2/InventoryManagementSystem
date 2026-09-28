@@ -22,6 +22,7 @@ import {
   dbUpdateCustomer,
   dbDeleteCustomer,
   dbInsertReceipt,
+  dbUpdateReceipt,
   dbDeleteReceipt,
   dbAdjustProductQuantity,
 } from "./db";
@@ -58,7 +59,7 @@ type State = {
   currency: string;
   setCurrency: (currency: string) => void;
 
-  addProduct: (p: Omit<Product, "id" | "createdAt">) => void;
+  addProduct: (p: Omit<Product, "id" | "createdAt" | "totalReceived"> & { totalReceived?: number }) => void;
   updateProduct: (id: string, p: Partial<Product>) => void;
   deleteProduct: (id: string) => void;
 
@@ -76,7 +77,7 @@ type State = {
   /** Find by name (case-insensitive) or create and return. */
   upsertCustomerByName: (c: Omit<Customer, "id" | "createdAt">) => Customer;
 
-  addTransaction: (t: Omit<Transaction, "id" | "date"> & { date?: string }) => void;
+  addTransaction: (t: Omit<Transaction, "id" | "date"> & { date?: string; skipTotalReceived?: boolean }) => void;
 
   addReceipt: (r: {
     type: ReceiptType;
@@ -89,6 +90,18 @@ type State = {
     note: string;
   }) => Receipt;
   deleteReceipt: (id: string) => void;
+  updateReceipt: (
+    id: string,
+    patch: {
+      partyName: string;
+      partyContact: string;
+      partyAddress: string;
+      items: ReceiptItem[];
+      discountPercent: number;
+      taxPercent: number;
+      note: string;
+    }
+  ) => void;
 };
 
 function makeId(prefix: string) {
@@ -103,37 +116,58 @@ function nextReceiptNumber(type: ReceiptType, existing: Receipt[]) {
 }
 
 
-/** Lifetime received never shrinks. Prefer stored total; recover from sales if missing. */
-function resolveTotalReceived(product: Product, receipts: Receipt[]): number {
-  let sold = 0;
-  for (const r of receipts) {
-    if (r.type !== "sale") continue;
-    for (const item of r.items) {
-      if (item.productId === product.id) sold += item.quantity;
-    }
+/** Apply quantity / totalReceived deltas for one product (clamped). */
+function applyStockDelta(
+  set: (fn: (s: State) => Partial<State>) => void,
+  get: () => State,
+  productId: string,
+  qtyDelta: number,
+  totalDelta: number
+) {
+  const current = get().products.find((p) => p.id === productId);
+  if (!current) return;
+  const newQuantity = Math.max(0, current.quantity + qtyDelta);
+  let newTotal = Math.max(0, (current.totalReceived ?? current.quantity) + totalDelta);
+  if (newTotal < newQuantity) newTotal = newQuantity;
+
+  set((s) => ({
+    products: s.products.map((p) =>
+      p.id === productId ? { ...p, quantity: newQuantity, totalReceived: newTotal } : p
+    ),
+  }));
+
+  if (isSupabaseConfigured) {
+    dbAdjustProductQuantity(productId, newQuantity, newTotal).catch((err) => {
+      toast.error("Couldn't update stock quantity in Supabase");
+      console.error(err);
+    });
   }
-  const recovered = product.quantity + sold;
-  const stored = product.totalReceived ?? product.quantity;
-  return Math.max(stored, recovered, product.quantity);
 }
 
-function mergeProductPreserveTotals(prev: Product | undefined, incoming: Product, receipts: Receipt[]): Product {
-  const base = { ...incoming };
-  const candidates = [
-    base.totalReceived ?? 0,
-    base.quantity,
-    prev?.totalReceived ?? 0,
-  ];
-  // Recover from sale history so "total added" survives if DB column is missing
-  let sold = 0;
-  for (const r of receipts) {
-    if (r.type !== "sale") continue;
-    for (const item of r.items) {
-      if (item.productId === base.id) sold += item.quantity;
-    }
+function sumItemsByProduct(items: ReceiptItem[]): Map<string, number> {
+  const map = new Map<string, number>();
+  for (const item of items) {
+    map.set(item.productId, (map.get(item.productId) ?? 0) + item.quantity);
   }
-  candidates.push(base.quantity + sold);
-  base.totalReceived = Math.max(...candidates);
+  return map;
+}
+
+/** Prefer DB/local totalReceived; do not re-inflate from receipt history during live edits. */
+function mergeProductPreserveTotals(prev: Product | undefined, incoming: Product, _receipts: Receipt[]): Product {
+  const base = { ...incoming };
+  const qty = base.quantity ?? 0;
+  const incomingTotal = base.totalReceived;
+  const prevTotal = prev?.totalReceived;
+  // Trust a concrete total from the row we just wrote / received
+  if (incomingTotal != null && incomingTotal >= qty) {
+    base.totalReceived = incomingTotal;
+    return base;
+  }
+  if (prevTotal != null && prevTotal >= qty) {
+    base.totalReceived = prevTotal;
+    return base;
+  }
+  base.totalReceived = qty;
   return base;
 }
 
@@ -247,7 +281,10 @@ export const useStore = create<State>()(
         set((s) => ({ products: [product, ...s.products] }));
         if (isSupabaseConfigured) {
           dbInsertProduct(product).catch((err) => {
-            toast.error("Couldn't save product to Supabase");
+            // Roll back optimistic local add so UI matches DB
+            set((s) => ({ products: s.products.filter((x) => x.id !== product.id) }));
+            const msg = err && typeof err === "object" && "message" in err ? String((err as { message: string }).message) : "Unknown error";
+            toast.error(`Couldn't save product to Supabase: ${msg}`);
             console.error(err);
           });
         }
@@ -256,10 +293,16 @@ export const useStore = create<State>()(
         const prev = get().products.find((x) => x.id === id);
         let patch: Partial<Product> = { ...p };
         if (prev) {
-          if (p.quantity !== undefined && p.totalReceived === undefined && p.quantity > prev.quantity) {
+          // Restock via Products tab: raising quantity on hand also raises Total added
+          if (p.quantity !== undefined && p.quantity > prev.quantity) {
             const delta = p.quantity - prev.quantity;
-            patch.totalReceived = (prev.totalReceived ?? prev.quantity) + delta;
+            const baseTotal = prev.totalReceived ?? prev.quantity;
+            // Only auto-bump when caller didn't set totalReceived explicitly to something else
+            if (p.totalReceived === undefined) {
+              patch.totalReceived = baseTotal + delta;
+            }
           }
+          // Lowering quantity on hand does NOT reduce Total added (units still "were received")
           const nextQty = p.quantity ?? prev.quantity;
           const nextTotal = patch.totalReceived ?? prev.totalReceived ?? prev.quantity;
           if (nextTotal < nextQty) {
@@ -402,30 +445,33 @@ export const useStore = create<State>()(
       // automatically by addReceipt below. Only persisted locally — the
       // receipt itself is the durable record in Supabase.
       addTransaction: (t) => {
-        const transaction: Transaction = { ...t, id: makeId("t"), date: t.date ?? new Date().toISOString() };
-        const delta = t.type === "out" ? -t.quantity : t.quantity;
-        const current = get().products.find((p) => p.id === t.productId);
-        const newQuantity = Math.max(0, (current?.quantity ?? 0) + delta);
-        // Purchases / stock-in increase lifetime received; sales do not decrease it
-        const newTotalReceived =
-          t.type === "out"
-            ? current?.totalReceived ?? current?.quantity ?? 0
-            : (current?.totalReceived ?? current?.quantity ?? 0) + t.quantity;
+        const { skipTotalReceived, ...rest } = t;
+        const transaction: Transaction = {
+          id: makeId("t"),
+          date: t.date ?? new Date().toISOString(),
+          productId: rest.productId,
+          type: rest.type,
+          quantity: rest.quantity,
+          note: rest.note,
+          reference: rest.reference,
+        };
+        set((s) => ({ transactions: [transaction, ...s.transactions] }));
 
-        set((s) => ({
-          transactions: [transaction, ...s.transactions],
-          products: s.products.map((p) =>
-            p.id === t.productId
-              ? { ...p, quantity: newQuantity, totalReceived: Math.max(newTotalReceived, newQuantity) }
-              : p
-          ),
-        }));
-
-        if (isSupabaseConfigured) {
-          dbAdjustProductQuantity(t.productId, newQuantity, Math.max(newTotalReceived, newQuantity)).catch((err) => {
-            toast.error("Couldn't update stock quantity in Supabase");
-            console.error(err);
-          });
+        // Sales: qty down, total unchanged
+        // Purchases: qty up, total up
+        // Reversals use skipTotalReceived + opposite type (handled via explicit deltas below)
+        if (skipTotalReceived) {
+          if (t.type === "in") {
+            // reverse sale → qty up, total unchanged
+            applyStockDelta(set, get, t.productId, t.quantity, 0);
+          } else {
+            // reverse purchase → qty down, total down
+            applyStockDelta(set, get, t.productId, -t.quantity, -t.quantity);
+          }
+        } else if (t.type === "out") {
+          applyStockDelta(set, get, t.productId, -t.quantity, 0);
+        } else {
+          applyStockDelta(set, get, t.productId, t.quantity, t.quantity);
         }
       },
 
@@ -479,10 +525,94 @@ export const useStore = create<State>()(
         return receipt;
       },
       deleteReceipt: (id) => {
+        const existing = get().receipts.find((r) => r.id === id);
+        if (existing) {
+          const byProduct = sumItemsByProduct(existing.items);
+          for (const [productId, qty] of byProduct) {
+            if (existing.type === "sale") {
+              // Put sold units back; Total added unchanged
+              applyStockDelta(set, get, productId, qty, 0);
+            } else {
+              // Undo purchase: available and total both down
+              applyStockDelta(set, get, productId, -qty, -qty);
+            }
+          }
+        }
         set((s) => ({ receipts: s.receipts.filter((r) => r.id !== id) }));
         if (isSupabaseConfigured) {
           dbDeleteReceipt(id).catch((err) => {
             toast.error("Couldn't delete receipt in Supabase");
+            console.error(err);
+          });
+        }
+      },
+
+      updateReceipt: (id, patch) => {
+        const existing = get().receipts.find((r) => r.id === id);
+        if (!existing) return;
+
+        const oldByProduct = sumItemsByProduct(existing.items);
+        const newByProduct = sumItemsByProduct(patch.items);
+        const productIds = new Set([...oldByProduct.keys(), ...newByProduct.keys()]);
+
+        // Net stock change only — never reverse+reapply (that raced with realtime and inflated Total)
+        for (const productId of productIds) {
+          const oldQ = oldByProduct.get(productId) ?? 0;
+          const newQ = newByProduct.get(productId) ?? 0;
+          const diff = newQ - oldQ; // positive = more on this receipt than before
+          if (diff === 0) continue;
+          if (existing.type === "sale") {
+            // More sold → available down; less sold → available up. Total added never changes.
+            applyStockDelta(set, get, productId, -diff, 0);
+          } else {
+            // Purchase: more received → available + total up; less → both down
+            applyStockDelta(set, get, productId, diff, diff);
+          }
+        }
+
+        set((s) => ({
+          transactions: [
+            {
+              id: makeId("t"),
+              productId: "edit",
+              type: "adjustment" as const,
+              quantity: 0,
+              note: `Edited ${existing.receiptNumber}`,
+              reference: existing.receiptNumber,
+              date: new Date().toISOString(),
+            },
+            ...s.transactions,
+          ],
+        }));
+
+        const subtotal = patch.items.reduce((sum, i) => sum + i.quantity * i.unitPrice, 0);
+        const discountAmount = subtotal * (patch.discountPercent / 100);
+        const taxable = subtotal - discountAmount;
+        const taxAmount = taxable * (patch.taxPercent / 100);
+        const total = taxable + taxAmount;
+
+        const updated: Receipt = {
+          ...existing,
+          partyName: patch.partyName,
+          partyContact: patch.partyContact,
+          partyAddress: patch.partyAddress,
+          items: patch.items,
+          discountPercent: patch.discountPercent,
+          taxPercent: patch.taxPercent,
+          subtotal,
+          discountAmount,
+          taxAmount,
+          total,
+          note: patch.note,
+        };
+
+        set((s) => ({
+          receipts: s.receipts.map((r) => (r.id === id ? updated : r)),
+        }));
+
+        if (isSupabaseConfigured) {
+          dbUpdateReceipt(id, updated).catch((err) => {
+            toast.error("Couldn't update receipt in Supabase");
             console.error(err);
           });
         }

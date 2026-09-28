@@ -1,5 +1,5 @@
 import { Receipt } from "@/lib/types";
-import { formatCurrency, formatDate } from "@/lib/utils";
+import { formatCurrency, formatDateTime } from "@/lib/utils";
 import { useStore } from "@/lib/store";
 import { Boxes } from "lucide-react";
 
@@ -28,7 +28,7 @@ export default function ReceiptPreview({ receipt }: { receipt: Receipt }) {
             {isSale ? "Sales Receipt" : "Purchase Receipt"}
           </p>
           <p className="mt-2 text-sm font-medium">{receipt.receiptNumber || "—"}</p>
-          <p className="text-xs text-muted">{formatDate(receipt.date)}</p>
+          <p className="text-xs text-muted">{formatDateTime(receipt.date)}</p>
         </div>
       </div>
 
